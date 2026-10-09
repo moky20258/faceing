@@ -535,6 +535,14 @@ class MainWindow(QMainWindow):
         footer.mousePressEvent = lambda _e: webbrowser.open("https://deeplivecam.net")
         layout.addWidget(footer)
 
+        # resize() alone squeezes widgets to their minimum sizes when the
+        # content's natural size exceeds the fixed minimum, clipping the last
+        # Options row (worse with HiDPI fonts and bilingual labels) — grow to
+        # the layout's preferred size instead. resize() doesn't clamp to the
+        # screen like adjustSize() does.
+        hint = self.sizeHint()
+        self.resize(max(ROOT_WIDTH, hint.width()), max(ROOT_HEIGHT, hint.height()))
+
     # ── image row ────────────────────────────────────────────────────────
 
     def _build_image_row(self) -> QHBoxLayout:
@@ -895,9 +903,13 @@ class MainWindow(QMainWindow):
             temp_path = os.path.join(tempfile.gettempdir(), "deep_live_cam_random_face.jpg")
             with open(temp_path, "wb") as f:
                 f.write(response.content)
-            modules.globals.source_path = temp_path
-            self.source_label.setPixmap(render_image_preview(temp_path, (200, 200)))
+            # Validate the payload is a decodable image before pointing
+            # source_path at it — some networks answer with an HTTP 200 HTML
+            # block page, which previously crashed the live thread later.
+            pixmap = render_image_preview(temp_path, (200, 200))
+            self.source_label.setPixmap(pixmap)
             self.source_label.setText("")
+            modules.globals.source_path = temp_path
         except Exception as exc:
             print(f"Failed to fetch random face: {exc}")
 
@@ -948,11 +960,11 @@ class MainWindow(QMainWindow):
             update_status("Transparency set to 100%.")
         else:
             modules.globals.face_swapper_enabled = True
-            update_status(f"Transparency set to {pct}%")
+            update_status(_("Transparency set to {}%").replace("{}", f"{pct}"))
 
     def _on_sharpness_change(self, value: float) -> None:
         modules.globals.sharpness = value
-        update_status(f"Sharpness set to {value:.1f}")
+        update_status(_("Sharpness set to {}").replace("{}", f"{value:.1f}"))
 
     def _on_mouth_mask_change(self, value: float) -> None:
         modules.globals.mouth_mask_size = value
@@ -1280,7 +1292,7 @@ class _ProcessingWorker(QThread):
 class WebcamPreviewWindow(QWidget):
     def __init__(self, camera_index: int):
         super().__init__()
-        self.setWindowTitle("Live Preview")
+        self.setWindowTitle(_("Live Preview"))
         self.resize(PREVIEW_DEFAULT_WIDTH, PREVIEW_DEFAULT_HEIGHT)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1289,9 +1301,13 @@ class WebcamPreviewWindow(QWidget):
         self._image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._image_label, 1)
 
+        # Create before the capture attempt: on start failure closeEvent
+        # fires via singleShot below, and it (and _tick) touch _stop_event.
+        self._stop_event = threading.Event()
         self._cap = VideoCapturer(camera_index)
         req_w, req_h = modules.globals.capture_resolution
         if not self._cap.start(req_w, req_h, 60):
+            self._stop_event.set()
             update_status("Failed to start camera")
             QTimer.singleShot(0, self.close)
             return
@@ -1304,7 +1320,6 @@ class WebcamPreviewWindow(QWidget):
 
         self._capture_queue: queue.Queue = queue.Queue(maxsize=2)
         self._processed_queue: queue.Queue = queue.Queue(maxsize=2)
-        self._stop_event = threading.Event()
 
         self._capture_worker = _CaptureWorker(
             self._cap, self._capture_queue, self._stop_event
@@ -1336,13 +1351,10 @@ class WebcamPreviewWindow(QWidget):
         self._stop_event.set()
         try:
             self._timer.stop()
+            for worker in (self._capture_worker, self._processing_worker):
+                worker.wait(2000)
         except Exception:
             pass
-        for worker in (self._capture_worker, self._processing_worker):
-            try:
-                worker.wait(2000)
-            except Exception:
-                pass
         try:
             self._cap.release()
         except Exception:

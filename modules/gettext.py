@@ -4,6 +4,7 @@ from pathlib import Path
 class LanguageManager:
     def __init__(self, default_language="en"):
         self.current_language = default_language
+        self.bilingual = default_language.endswith("bi")
         self.translations = {}
         self.load_language(default_language)
 
@@ -12,7 +13,8 @@ class LanguageManager:
         if language_code == "en":
             return True
         try:
-            file_path = Path(__file__).parent.parent / f"locales/{language_code}.json"
+            file_code = language_code.removesuffix("bi")
+            file_path = Path(__file__).parent.parent / f"locales/{file_code}.json"
             with open(file_path, "r", encoding="utf-8") as file:
                 self.translations = json.load(file)
             self.current_language = language_code
@@ -22,5 +24,8 @@ class LanguageManager:
             return False
 
     def _(self, key, default=None) -> str:
-        """get translate text"""
-        return self.translations.get(key, default if default else key)
+        """get translate text; bilingual mode appends the original English key"""
+        text = self.translations.get(key, default if default else key)
+        if self.bilingual and text != key:
+            return f"{text} {key}"
+        return text
